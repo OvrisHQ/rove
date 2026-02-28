@@ -545,34 +545,30 @@ pub async fn handle_doctor(config: &Config, format: OutputFormat) -> Result<()> 
             match crate::crypto::CryptoModule::new() {
                 Ok(crypto) => match std::fs::read(manifest_path) {
                     Ok(bytes) => {
-                        if let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                            if let Some(sig) = manifest.get("signature").and_then(|s| s.as_str()) {
-                                if sig.contains("PLACEHOLDER") || sig.contains("LOCAL_DEV") {
-                                    checks.push(("Manifest signature", "Dev placeholder (OK for development)"));
-                                } else {
-                                    let mut verify_manifest = manifest.clone();
-                                    if let Some(obj) = verify_manifest.as_object_mut() {
-                                        obj.remove("signature");
-                                    }
-                                    if let Ok(verify_bytes) = serde_json::to_vec(&verify_manifest) {
-                                        match crypto.verify_manifest(&verify_bytes, sig) {
-                                            Ok(()) => checks.push(("Manifest signature", "Valid")),
-                                            Err(_) => {
-                                                checks.push(("Manifest signature", "INVALID"));
-                                                issues.push(
-                                                    "Manifest signature verification failed!"
-                                                        .to_string(),
-                                                );
-                                            }
+                        match crypto.verify_manifest_file(&bytes) {
+                            Ok(()) => {
+                                // Check if it was a placeholder
+                                if let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                                    if let Some(sig) = manifest.get("signature").and_then(|s| s.as_str()) {
+                                        if sig.contains("PLACEHOLDER") || sig.contains("LOCAL_DEV") {
+                                            checks.push(("Manifest signature", "Dev placeholder (OK for development)"));
+                                        } else {
+                                            checks.push(("Manifest signature", "Valid"));
                                         }
+                                    } else {
+                                        checks.push(("Manifest", "Present (unsigned)"));
                                     }
+                                } else {
+                                    checks.push(("Manifest signature", "Valid"));
                                 }
-                            } else {
-                                checks.push(("Manifest", "Present (unsigned)"));
                             }
-                        } else {
-                            checks.push(("Manifest", "Invalid JSON"));
-                            issues.push("Manifest file contains invalid JSON".to_string());
+                            Err(_) => {
+                                checks.push(("Manifest signature", "INVALID"));
+                                issues.push(
+                                    "Manifest signature verification failed!"
+                                        .to_string(),
+                                );
+                            }
                         }
                     }
                     Err(e) => {
@@ -1001,7 +997,7 @@ pub async fn handle_update(check_only: bool, format: OutputFormat) -> Result<()>
         asset.size as f64 / 1_048_576.0
     );
 
-    // Stream download
+    // Stream download into memory (verify before writing to disk)
     let response = client
         .get(&asset.browser_download_url)
         .send()
@@ -1029,6 +1025,92 @@ pub async fn handle_update(check_only: bool, format: OutputFormat) -> Result<()>
         }
     }
     eprintln!("\r  Progress: 100%");
+
+    // Verify integrity: check SHA-256 hash against release manifest if available
+    // Look for a manifest.json asset in the release
+    let manifest_asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == "manifest.json");
+
+    if let Some(manifest_asset) = manifest_asset {
+        eprintln!("Verifying download integrity...");
+
+        let manifest_response = client
+            .get(&manifest_asset.browser_download_url)
+            .send()
+            .await?
+            .error_for_status()
+            .context("Failed to download release manifest")?;
+
+        let manifest_bytes = manifest_response
+            .bytes()
+            .await
+            .context("Failed to read release manifest")?;
+
+        // Verify manifest signature
+        match crate::crypto::CryptoModule::new() {
+            Ok(crypto) => {
+                match crypto.verify_manifest_file(&manifest_bytes) {
+                    Ok(()) => {
+                        eprintln!("  Manifest signature: verified");
+
+                        // Check binary hash against manifest
+                        let computed_hash = crate::crypto::CryptoModule::compute_hash(&bytes);
+
+                        if let Ok(manifest_value) =
+                            serde_json::from_slice::<serde_json::Value>(&manifest_bytes)
+                        {
+                            // Look for our binary's hash in the manifest
+                            let expected_hash = manifest_value
+                                .get("binaries")
+                                .and_then(|b| b.get(&asset.name))
+                                .and_then(|b| b.get("hash"))
+                                .and_then(|h| h.as_str())
+                                .or_else(|| {
+                                    // Fallback: check core_tools array
+                                    manifest_value
+                                        .get("core_tools")
+                                        .and_then(|t| t.as_array())
+                                        .and_then(|arr| {
+                                            arr.iter().find_map(|entry| {
+                                                let name =
+                                                    entry.get("id").and_then(|i| i.as_str())?;
+                                                if name == "rove" || asset.name.contains(name) {
+                                                    entry.get("hash").and_then(|h| h.as_str())
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                        })
+                                });
+
+                            if let Some(expected) = expected_hash {
+                                if computed_hash != expected {
+                                    return Err(anyhow::anyhow!(
+                                        "Binary hash mismatch! Expected: {}, Got: {}. Download may be corrupted or tampered.",
+                                        expected, computed_hash
+                                    ));
+                                }
+                                eprintln!("  Binary hash: verified (SHA-256: {}...)", &computed_hash[..16]);
+                            } else {
+                                eprintln!("  Binary hash: not in manifest (skipping hash check)");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  Warning: Manifest signature verification failed: {}", e);
+                        eprintln!("  Proceeding with update (signature verification will be enforced in future releases)");
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("  Warning: Cannot initialize crypto module: {}", e);
+            }
+        }
+    } else {
+        eprintln!("  Note: No release manifest found (hash verification skipped)");
+    }
 
     // Write to temp file and self-replace
     let temp_path = std::env::temp_dir().join(&asset.name);

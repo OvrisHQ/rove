@@ -2,7 +2,7 @@
 //!
 //! This module provides cryptographic verification for the Rove engine:
 //! - Ed25519 signature verification for manifests and core tools
-//! - BLAKE3 file hashing for integrity verification
+//! - SHA-256 file hashing for integrity verification
 //! - Automatic deletion of compromised files
 //!
 //! # Security
@@ -13,6 +13,7 @@
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH};
 use sdk::errors::EngineError;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
@@ -20,15 +21,16 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-// The key is embedded at compile time.
-// In development: a placeholder test key is used (clearly marked).
-// In production CI: real key injected via environment variable.
+// Keys are loaded from build.rs output in OUT_DIR.
+// build.rs resolves the correct key from env vars or manifest/ files.
 
 #[cfg(not(feature = "production"))]
-const TEAM_PUBLIC_KEY_BYTES: &[u8] = include_bytes!("../../../manifest/dev_public_key.bin");
+const TEAM_PUBLIC_KEY_BYTES: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/dev_public_key.bin"));
 
 #[cfg(feature = "production")]
-const TEAM_PUBLIC_KEY_BYTES: &[u8] = include_bytes!("../../../manifest/team_public_key.bin");
+const TEAM_PUBLIC_KEY_BYTES: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/team_public_key.bin"));
 
 /// Nonce cache window in seconds
 ///
@@ -81,36 +83,16 @@ impl NonceCache {
     }
 
     /// Check if a nonce exists in the cache
-    ///
-    /// # Arguments
-    ///
-    /// * `nonce` - The nonce to check
-    ///
-    /// # Returns
-    ///
-    /// Returns true if the nonce has been seen before, false otherwise.
     fn contains(&self, nonce: &u64) -> bool {
         self.cache.contains_key(nonce)
     }
 
     /// Insert a nonce into the cache with its timestamp
-    ///
-    /// # Arguments
-    ///
-    /// * `nonce` - The nonce to insert
-    /// * `timestamp` - Unix timestamp when the nonce was seen
     fn insert(&mut self, nonce: u64, timestamp: u64) {
         self.cache.insert(nonce, timestamp);
     }
 
     /// Evict nonces older than the specified cutoff timestamp
-    ///
-    /// This method removes all nonces that were seen before the cutoff time,
-    /// freeing memory and ensuring the cache doesn't grow unbounded.
-    ///
-    /// # Arguments
-    ///
-    /// * `cutoff` - Unix timestamp; nonces older than this are removed
     fn evict_older_than(&mut self, cutoff: u64) {
         self.cache.retain(|_, &mut ts| ts >= cutoff);
     }
@@ -120,28 +102,9 @@ impl NonceCache {
 ///
 /// Provides methods for:
 /// - Verifying Ed25519 signatures on manifests
-/// - Computing and verifying BLAKE3 file hashes
+/// - Computing and verifying SHA-256 file hashes
 /// - Deleting compromised files on verification failure
 /// - Verifying envelopes with nonce-based replay prevention
-///
-/// # Examples
-///
-/// ```no_run
-/// use rove_engine::crypto::CryptoModule;
-/// use std::path::Path;
-///
-/// let crypto = CryptoModule::new().unwrap();
-///
-/// // Verify a manifest signature
-/// let manifest_bytes = std::fs::read("manifest.json").unwrap();
-/// let signature_hex = "...";
-/// crypto.verify_manifest(&manifest_bytes, signature_hex).unwrap();
-///
-/// // Verify a file hash
-/// let file_path = Path::new("plugin.wasm");
-/// let expected_hash = "blake3:...";
-/// crypto.verify_file(file_path, expected_hash).unwrap();
-/// ```
 pub struct CryptoModule {
     team_public_key: VerifyingKey,
     nonce_cache: Arc<Mutex<NonceCache>>,
@@ -180,32 +143,33 @@ impl CryptoModule {
         })
     }
 
+    /// Create a CryptoModule with a specific verifying key (for testing)
+    #[cfg(test)]
+    pub fn with_key(key: VerifyingKey) -> Self {
+        Self {
+            team_public_key: key,
+            nonce_cache: Arc::new(Mutex::new(NonceCache::new())),
+        }
+    }
+
+    /// Whether we're running a production build
+    pub fn is_production() -> bool {
+        cfg!(feature = "production")
+    }
+
     /// Verify a manifest signature using the team public key
     ///
-    /// This method verifies that the manifest was signed by the team's private key.
-    /// The signature must be in hex format with the "ed25519:" prefix.
+    /// The signature must be a hex-encoded Ed25519 signature, optionally
+    /// prefixed with "ed25519:".
     ///
     /// # Arguments
     ///
-    /// * `manifest_bytes` - The raw manifest JSON bytes to verify
-    /// * `signature_hex` - The signature in hex format (e.g., "ed25519:abcd1234...")
+    /// * `manifest_bytes` - The canonical manifest JSON bytes to verify
+    /// * `signature_hex` - The signature in hex format
     ///
     /// # Errors
     ///
-    /// Returns `EngineError::InvalidSignature` if:
-    /// - The signature format is invalid
-    /// - The signature does not match the manifest
-    /// - The signature was not created by the team's private key
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use rove_engine::crypto::CryptoModule;
-    /// let crypto = CryptoModule::new().unwrap();
-    /// let manifest = br#"{"version": "1.0.0"}"#;
-    /// let signature = "ed25519:1234abcd...";
-    /// crypto.verify_manifest(manifest, signature).unwrap();
-    /// ```
+    /// Returns `EngineError::InvalidSignature` if verification fails.
     pub fn verify_manifest(
         &self,
         manifest_bytes: &[u8],
@@ -228,49 +192,24 @@ impl CryptoModule {
         Ok(())
     }
 
-    /// Verify a file's BLAKE3 hash and delete it if verification fails
-    ///
-    /// This method computes the BLAKE3 hash of a file and compares it to the
-    /// expected hash. If the hashes don't match, the file is immediately deleted
-    /// to prevent execution of compromised code.
+    /// Verify a file's SHA-256 hash and delete it if verification fails
     ///
     /// # Arguments
     ///
     /// * `path` - Path to the file to verify
-    /// * `expected_hash` - Expected hash in format "blake3:hex_string"
-    ///
-    /// # Errors
-    ///
-    /// Returns `EngineError::HashMismatch` if:
-    /// - The computed hash doesn't match the expected hash
-    /// - The file is deleted after mismatch detection
-    ///
-    /// Returns `EngineError::Io` if:
-    /// - The file cannot be read
-    /// - The file cannot be deleted after mismatch
+    /// * `expected_hash` - Expected SHA-256 hash as hex string (no prefix)
     ///
     /// # Security
     ///
     /// **CRITICAL**: This method deletes the file on hash mismatch to prevent
-    /// execution of tampered binaries. This is a security feature, not a bug.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use rove_engine::crypto::CryptoModule;
-    /// # use std::path::Path;
-    /// let crypto = CryptoModule::new().unwrap();
-    /// let path = Path::new("plugin.wasm");
-    /// let expected = "blake3:abcd1234...";
-    /// crypto.verify_file(path, expected).unwrap();
-    /// ```
+    /// execution of tampered binaries.
     pub fn verify_file(&self, path: &Path, expected_hash: &str) -> Result<(), EngineError> {
         tracing::debug!("Verifying file hash: {}", path.display());
 
-        // Parse expected hash
+        // Parse expected hash (strip optional prefix, accept raw hex)
         let expected = self.parse_hash(expected_hash)?;
 
-        // Compute BLAKE3 hash of file
+        // Compute SHA-256 hash of file
         let computed = self.compute_file_hash(path)?;
 
         // Compare hashes
@@ -302,19 +241,8 @@ impl CryptoModule {
 
     /// Verify an individual tool's Ed25519 signature
     ///
-    /// This method verifies that a core tool binary was signed by the team.
-    /// It computes the BLAKE3 hash of the file and verifies the signature
-    /// against that hash.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the tool binary
-    /// * `signature_hex` - The signature in hex format (e.g., "ed25519:abcd1234...")
-    ///
-    /// # Errors
-    ///
-    /// Returns `EngineError::InvalidSignature` if the signature is invalid.
-    /// Returns `EngineError::Io` if the file cannot be read.
+    /// Computes the SHA-256 hash of the file and verifies the signature
+    /// against that hash string.
     pub fn verify_file_signature(
         &self,
         path: &Path,
@@ -346,46 +274,12 @@ impl CryptoModule {
 
     /// Verify an envelope with timestamp, nonce, and signature checks
     ///
-    /// This method implements the complete envelope verification protocol:
-    /// 1. Check timestamp is within 30 seconds (Requirement 10.5)
-    /// 2. Check nonce is not in cache (Requirement 10.6)
-    /// 3. Verify Ed25519 signature (Requirement 10.7)
-    /// 4. Insert nonce into cache (Requirement 10.8)
-    /// 5. Evict old nonces (Requirement 10.9)
-    ///
-    /// # Arguments
-    ///
-    /// * `envelope` - The envelope to verify
-    ///
-    /// # Returns
-    ///
-    /// Returns the decrypted payload if all checks pass.
-    ///
-    /// # Errors
-    ///
-    /// Returns `EngineError::EnvelopeExpired` if the timestamp is too old or too far in the future.
-    /// Returns `EngineError::NonceReused` if the nonce has been seen before (replay attack).
-    /// Returns `EngineError::InvalidSignature` if the signature verification fails.
-    ///
-    /// # Security
-    ///
-    /// This method protects against replay attacks by maintaining a cache of recently
-    /// seen nonces. Each nonce can only be used once within the 30-second window.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use rove_engine::crypto::{CryptoModule, Envelope};
-    /// # use ed25519_dalek::Signature;
-    /// let crypto = CryptoModule::new().unwrap();
-    /// let envelope = Envelope {
-    ///     timestamp: 1234567890,
-    ///     nonce: 42,
-    ///     payload: b"secret message".to_vec(),
-    ///     signature: Signature::from_bytes(&[0u8; 64]),
-    /// };
-    /// let payload = crypto.verify_envelope(&envelope).unwrap();
-    /// ```
+    /// Protocol:
+    /// 1. Check timestamp is within 30 seconds
+    /// 2. Check nonce is not in cache (replay prevention)
+    /// 3. Verify Ed25519 signature
+    /// 4. Insert nonce into cache
+    /// 5. Evict old nonces
     pub fn verify_envelope(&self, envelope: &Envelope) -> Result<Vec<u8>, EngineError> {
         tracing::debug!("Verifying envelope with nonce {}", envelope.nonce);
 
@@ -395,7 +289,7 @@ impl CryptoModule {
             .map_err(|e| EngineError::Config(format!("System time error: {}", e)))?
             .as_secs();
 
-        // Requirement 10.5: Check timestamp is within 30 seconds
+        // Check timestamp is within 30 seconds
         let time_diff = (now as i64 - envelope.timestamp).abs();
         if time_diff > NONCE_WINDOW_SECS as i64 {
             tracing::warn!(
@@ -405,7 +299,7 @@ impl CryptoModule {
             return Err(EngineError::EnvelopeExpired);
         }
 
-        // Requirement 10.6: Check nonce is not in cache (replay prevention)
+        // Check nonce is not in cache (replay prevention)
         let mut cache = self.nonce_cache.lock().expect("nonce_cache lock poisoned");
         if cache.contains(&envelope.nonce) {
             tracing::error!(
@@ -415,7 +309,7 @@ impl CryptoModule {
             return Err(EngineError::NonceReused);
         }
 
-        // Requirement 10.7: Verify Ed25519 signature
+        // Verify Ed25519 signature
         self.team_public_key
             .verify(&envelope.payload, &envelope.signature)
             .map_err(|e| {
@@ -423,11 +317,11 @@ impl CryptoModule {
                 EngineError::InvalidSignature
             })?;
 
-        // Requirement 10.8: Insert nonce into cache before processing
+        // Insert nonce into cache before processing
         cache.insert(envelope.nonce, now);
         tracing::debug!("Nonce {} inserted into cache", envelope.nonce);
 
-        // Requirement 10.9: Evict nonces older than 30 seconds
+        // Evict nonces older than 30 seconds
         let cutoff = now.saturating_sub(NONCE_WINDOW_SECS);
         cache.evict_older_than(cutoff);
 
@@ -435,24 +329,13 @@ impl CryptoModule {
         Ok(envelope.payload.clone())
     }
 
-    /// Compute BLAKE3 hash of a file
+    /// Compute SHA-256 hash of a file
     ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the file to hash
-    ///
-    /// # Returns
-    ///
-    /// Returns the hex-encoded BLAKE3 hash of the file.
-    ///
-    /// # Errors
-    ///
-    /// Returns `EngineError::Io` if the file cannot be read.
+    /// Returns the hex-encoded SHA-256 hash.
     fn compute_file_hash(&self, path: &Path) -> Result<String, EngineError> {
         let mut file = File::open(path)?;
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = Sha256::new();
 
-        // Read file in chunks and update hasher
         let mut buffer = [0u8; 8192];
         loop {
             let bytes_read = file.read(&mut buffer)?;
@@ -463,49 +346,47 @@ impl CryptoModule {
         }
 
         let hash = hasher.finalize();
-        Ok(hash.to_hex().to_string())
+        Ok(hex::encode(hash))
     }
 
-    /// Parse a hash string in format "blake3:hex_string"
+    /// Compute SHA-256 hash of raw bytes
+    pub fn compute_hash(data: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        hex::encode(hasher.finalize())
+    }
+
+    /// Parse a hash string, accepting raw hex or prefixed formats
     ///
-    /// # Arguments
-    ///
-    /// * `hash_str` - Hash string to parse
-    ///
-    /// # Returns
-    ///
-    /// Returns the hex portion of the hash string.
-    ///
-    /// # Errors
-    ///
-    /// Returns `EngineError::Config` if the hash format is invalid.
+    /// Accepts:
+    /// - Raw hex: "abcd1234..."
+    /// - Prefixed: "sha256:abcd1234..."
+    /// - Legacy: "blake3:abcd1234..." (prefix stripped, treated as raw hex)
     fn parse_hash(&self, hash_str: &str) -> Result<String, EngineError> {
-        if let Some(hex) = hash_str.strip_prefix("blake3:") {
+        if let Some(hex) = hash_str.strip_prefix("sha256:") {
             Ok(hex.to_string())
-        } else if let Some(hex) = hash_str.strip_prefix("sha256:") {
-            // Support legacy sha256 format for compatibility
+        } else if let Some(hex) = hash_str.strip_prefix("blake3:") {
+            // Legacy compatibility — strip prefix, treat as hex
             Ok(hex.to_string())
         } else {
-            Err(EngineError::Config(format!(
-                "Invalid hash format: expected 'blake3:hex' or 'sha256:hex', got '{}'",
-                hash_str
-            )))
+            // Accept raw hex (no prefix) — this is the standard format
+            // Validate it looks like hex
+            if hash_str.len() == 64 && hash_str.chars().all(|c| c.is_ascii_hexdigit()) {
+                Ok(hash_str.to_string())
+            } else if hash_str.is_empty() {
+                Err(EngineError::Config("Empty hash string".to_string()))
+            } else {
+                // Accept any hex string (may be different length for other algorithms)
+                Ok(hash_str.to_string())
+            }
         }
     }
 
-    /// Parse a signature string in format "ed25519:hex_string"
+    /// Parse a signature string
     ///
-    /// # Arguments
-    ///
-    /// * `sig_str` - Signature string to parse
-    ///
-    /// # Returns
-    ///
-    /// Returns the parsed Ed25519 signature.
-    ///
-    /// # Errors
-    ///
-    /// Returns `EngineError::InvalidSignature` if the signature format is invalid.
+    /// Accepts:
+    /// - "ed25519:hex_string"
+    /// - Raw hex string
     fn parse_signature(&self, sig_str: &str) -> Result<Signature, EngineError> {
         // Remove "ed25519:" prefix if present
         let hex = sig_str.strip_prefix("ed25519:").unwrap_or(sig_str);
@@ -526,64 +407,470 @@ impl CryptoModule {
             return Err(EngineError::InvalidSignature);
         }
 
-        // Parse signature - convert Vec<u8> to [u8; 64]
         let sig_bytes: [u8; SIGNATURE_LENGTH] = bytes
             .try_into()
             .map_err(|_| EngineError::InvalidSignature)?;
 
         Ok(Signature::from_bytes(&sig_bytes))
     }
+
+    /// Canonicalize a JSON manifest for signing/verification
+    ///
+    /// Strips `signature` and `signed_at` fields, then serializes
+    /// as compact JSON with sorted keys (BTreeMap ordering from serde_json::Value).
+    ///
+    /// Both Python signer and Rust verifier must produce identical bytes:
+    /// - Python: `json.dumps(data, sort_keys=True, separators=(',', ':'))`
+    /// - Rust: `serde_json::to_string()` on Value (BTreeMap = sorted keys, compact)
+    pub fn canonicalize_manifest(manifest_json: &[u8]) -> Result<Vec<u8>, EngineError> {
+        let mut value: serde_json::Value = serde_json::from_slice(manifest_json)
+            .map_err(|e| EngineError::Config(format!("Invalid manifest JSON: {}", e)))?;
+
+        // Remove signature-related fields before canonical serialization
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("signature");
+            obj.remove("signed_at");
+        }
+
+        // serde_json::Value uses BTreeMap internally, so keys are already sorted alphabetically.
+        // to_string() produces compact JSON with no whitespace — matching Python's
+        // json.dumps(data, sort_keys=True, separators=(',', ':'))
+        let canonical = serde_json::to_string(&value)
+            .map_err(|e| EngineError::Config(format!("Failed to serialize manifest: {}", e)))?;
+
+        Ok(canonical.into_bytes())
+    }
+
+    /// Verify a manifest file: parse JSON, canonicalize, verify signature
+    ///
+    /// This is the high-level method that handles the full verification flow:
+    /// 1. Parse JSON to extract signature
+    /// 2. Strip signature fields and canonicalize
+    /// 3. Verify the canonical bytes against the signature
+    pub fn verify_manifest_file(&self, manifest_json: &[u8]) -> Result<(), EngineError> {
+        let value: serde_json::Value = serde_json::from_slice(manifest_json)
+            .map_err(|e| EngineError::Config(format!("Invalid manifest JSON: {}", e)))?;
+
+        let signature = value
+            .get("signature")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| EngineError::Config("No signature in manifest".to_string()))?;
+
+        // Check for dev/placeholder signatures
+        if signature.contains("PLACEHOLDER") || signature.contains("LOCAL_DEV") {
+            if Self::is_production() {
+                return Err(EngineError::InvalidSignature);
+            }
+            tracing::debug!("Accepting dev placeholder signature (non-production build)");
+            return Ok(());
+        }
+
+        // Canonicalize and verify
+        let canonical = Self::canonicalize_manifest(manifest_json)?;
+        self.verify_manifest(&canonical, signature)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    // Note: These tests will fail until build.rs is set up to embed a valid key
-    // For now, we test the logic with mock data
+    /// Generate a test keypair and return (signing_key, crypto_module)
+    fn test_crypto() -> (SigningKey, CryptoModule) {
+        let signing_key = SigningKey::from_bytes(&[42u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let crypto = CryptoModule::with_key(verifying_key);
+        (signing_key, crypto)
+    }
 
     #[test]
     fn test_compute_file_hash() {
-        // Create a temporary file with known content
+        let (_, crypto) = test_crypto();
+
         let mut temp_file = NamedTempFile::new().unwrap();
         temp_file.write_all(b"test content").unwrap();
         temp_file.flush().unwrap();
 
-        // Note: This will fail until build.rs is set up
-        // For now, we just test that the function doesn't panic
-        // let crypto = CryptoModule::new().unwrap();
-        // let hash = crypto.compute_file_hash(temp_file.path()).unwrap();
-        // assert!(!hash.is_empty());
+        let hash = crypto.compute_file_hash(temp_file.path()).unwrap();
+        assert!(!hash.is_empty());
+        assert_eq!(hash.len(), 64); // SHA-256 hex = 64 chars
+
+        // Verify it's a valid SHA-256 hash of "test content"
+        let expected = CryptoModule::compute_hash(b"test content");
+        assert_eq!(hash, expected);
     }
 
     #[test]
-    fn test_parse_hash() {
-        // This will fail until build.rs is set up
-        // let crypto = CryptoModule::new().unwrap();
+    fn test_compute_hash_deterministic() {
+        let h1 = CryptoModule::compute_hash(b"hello world");
+        let h2 = CryptoModule::compute_hash(b"hello world");
+        assert_eq!(h1, h2);
 
-        // Test blake3 format
-        // let hash = crypto.parse_hash("blake3:abcd1234").unwrap();
-        // assert_eq!(hash, "abcd1234");
-
-        // Test sha256 format (legacy)
-        // let hash = crypto.parse_hash("sha256:abcd1234").unwrap();
-        // assert_eq!(hash, "abcd1234");
-
-        // Test invalid format
-        // let result = crypto.parse_hash("invalid:abcd1234");
-        // assert!(result.is_err());
+        let h3 = CryptoModule::compute_hash(b"different");
+        assert_ne!(h1, h3);
     }
 
     #[test]
-    fn test_parse_signature() {
-        // This will fail until build.rs is set up
-        // let crypto = CryptoModule::new().unwrap();
+    fn test_verify_file_hash_match() {
+        let (_, crypto) = test_crypto();
 
-        // Test with valid signature format
-        // let sig_hex = "ed25519:".to_string() + &"00".repeat(64);
-        // let result = crypto.parse_signature(&sig_hex);
-        // Note: This will fail because the signature bytes are invalid
-        // but it tests the parsing logic
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(b"test content").unwrap();
+        temp_file.flush().unwrap();
+
+        let expected = CryptoModule::compute_hash(b"test content");
+        let result = crypto.verify_file(temp_file.path(), &expected);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_file_hash_mismatch_deletes_file() {
+        let (_, crypto) = test_crypto();
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_path_buf();
+        temp_file.write_all(b"test content").unwrap();
+        temp_file.flush().unwrap();
+
+        // Keep file alive by extracting the path before dropping
+        let _ = temp_file.into_temp_path();
+
+        let result = crypto.verify_file(&path, "0000000000000000000000000000000000000000000000000000000000000000");
+        assert!(result.is_err());
+        // File should be deleted
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_parse_hash_raw_hex() {
+        let (_, crypto) = test_crypto();
+
+        // Raw hex (no prefix) — standard format from build-manifest.py
+        let hash = crypto
+            .parse_hash("c9508e28452d11f76561c45c0bbb0b517161012269f286823c6aad553c0a780f")
+            .unwrap();
+        assert_eq!(
+            hash,
+            "c9508e28452d11f76561c45c0bbb0b517161012269f286823c6aad553c0a780f"
+        );
+    }
+
+    #[test]
+    fn test_parse_hash_sha256_prefix() {
+        let (_, crypto) = test_crypto();
+
+        let hash = crypto.parse_hash("sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap();
+        assert_eq!(hash, "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234");
+    }
+
+    #[test]
+    fn test_parse_hash_blake3_legacy_prefix() {
+        let (_, crypto) = test_crypto();
+
+        let hash = crypto.parse_hash("blake3:abcd1234").unwrap();
+        assert_eq!(hash, "abcd1234");
+    }
+
+    #[test]
+    fn test_parse_hash_empty_fails() {
+        let (_, crypto) = test_crypto();
+        let result = crypto.parse_hash("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_signature_with_prefix() {
+        let (_, crypto) = test_crypto();
+
+        let sig_hex = "ed25519:".to_string() + &"ab".repeat(64);
+        let result = crypto.parse_signature(&sig_hex);
+        // Should parse (may or may not be a valid signature, but parsing succeeds)
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_signature_without_prefix() {
+        let (_, crypto) = test_crypto();
+
+        let sig_hex = "ab".repeat(64);
+        let result = crypto.parse_signature(&sig_hex);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_signature_invalid_hex() {
+        let (_, crypto) = test_crypto();
+        let result = crypto.parse_signature("not_valid_hex");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_signature_wrong_length() {
+        let (_, crypto) = test_crypto();
+        let result = crypto.parse_signature("abcd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_manifest_sign_and_verify() {
+        use ed25519_dalek::Signer;
+
+        let (signing_key, crypto) = test_crypto();
+
+        let manifest = serde_json::json!({
+            "version": "1.0.0",
+            "plugins": [],
+            "core_tools": [],
+            "signature": "will_be_removed",
+            "signed_at": "will_be_removed"
+        });
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+
+        // Canonicalize
+        let canonical = CryptoModule::canonicalize_manifest(&manifest_bytes).unwrap();
+
+        // Sign
+        let signature = signing_key.sign(&canonical);
+        let sig_hex = hex::encode(signature.to_bytes());
+
+        // Verify
+        let result = crypto.verify_manifest(&canonical, &sig_hex);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_manifest_tampered_fails() {
+        use ed25519_dalek::Signer;
+
+        let (signing_key, crypto) = test_crypto();
+
+        let manifest = serde_json::json!({
+            "version": "1.0.0",
+            "plugins": []
+        });
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let canonical = CryptoModule::canonicalize_manifest(&manifest_bytes).unwrap();
+
+        // Sign original
+        let signature = signing_key.sign(&canonical);
+        let sig_hex = hex::encode(signature.to_bytes());
+
+        // Tamper with manifest
+        let tampered = serde_json::json!({
+            "version": "1.0.0",
+            "plugins": [{"id": "malware", "hash": "evil"}]
+        });
+        let tampered_bytes = serde_json::to_vec(&tampered).unwrap();
+        let tampered_canonical = CryptoModule::canonicalize_manifest(&tampered_bytes).unwrap();
+
+        // Verification should fail
+        let result = crypto.verify_manifest(&tampered_canonical, &sig_hex);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_canonicalize_strips_signature_fields() {
+        let manifest = serde_json::json!({
+            "version": "1.0.0",
+            "plugins": [],
+            "signature": "some_sig",
+            "signed_at": "some_time"
+        });
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let canonical = CryptoModule::canonicalize_manifest(&bytes).unwrap();
+        let canonical_str = String::from_utf8(canonical).unwrap();
+
+        assert!(!canonical_str.contains("signature"));
+        assert!(!canonical_str.contains("signed_at"));
+        assert!(canonical_str.contains("version"));
+        assert!(canonical_str.contains("plugins"));
+    }
+
+    #[test]
+    fn test_canonicalize_sorted_keys() {
+        // Keys should be sorted alphabetically (BTreeMap)
+        let manifest = serde_json::json!({
+            "zebra": 1,
+            "alpha": 2,
+            "middle": 3
+        });
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let canonical = CryptoModule::canonicalize_manifest(&bytes).unwrap();
+        let canonical_str = String::from_utf8(canonical).unwrap();
+
+        // Should be: {"alpha":2,"middle":3,"zebra":1}
+        assert_eq!(canonical_str, r#"{"alpha":2,"middle":3,"zebra":1}"#);
+    }
+
+    #[test]
+    fn test_canonicalize_compact_no_whitespace() {
+        let manifest = serde_json::json!({
+            "key": "value",
+            "num": 42
+        });
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let canonical = CryptoModule::canonicalize_manifest(&bytes).unwrap();
+        let canonical_str = String::from_utf8(canonical).unwrap();
+
+        // No spaces, no newlines
+        assert!(!canonical_str.contains(' '));
+        assert!(!canonical_str.contains('\n'));
+    }
+
+    #[test]
+    fn test_verify_file_signature() {
+        use ed25519_dalek::Signer;
+
+        let (signing_key, crypto) = test_crypto();
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(b"plugin binary data").unwrap();
+        temp_file.flush().unwrap();
+
+        // Compute hash and sign it
+        let hash = crypto.compute_file_hash(temp_file.path()).unwrap();
+        let signature = signing_key.sign(hash.as_bytes());
+        let sig_hex = hex::encode(signature.to_bytes());
+
+        // Verify
+        let result = crypto.verify_file_signature(temp_file.path(), &sig_hex);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_manifest_file_placeholder_dev() {
+        let (_, crypto) = test_crypto();
+
+        let manifest = serde_json::json!({
+            "version": "1.0.0",
+            "plugins": [],
+            "signature": "LOCAL_DEV_PLACEHOLDER_SIGNATURE",
+            "signed_at": "local-development"
+        });
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+
+        // In non-production builds, placeholder should be accepted
+        if !CryptoModule::is_production() {
+            let result = crypto.verify_manifest_file(&bytes);
+            assert!(result.is_ok());
+        }
+    }
+
+    #[test]
+    fn test_verify_manifest_file_real_signature() {
+        use ed25519_dalek::Signer;
+
+        let (signing_key, crypto) = test_crypto();
+
+        // Build manifest without signature
+        let manifest_data = serde_json::json!({
+            "version": "1.0.0",
+            "plugins": [],
+            "core_tools": []
+        });
+        let data_bytes = serde_json::to_vec(&manifest_data).unwrap();
+        let canonical = CryptoModule::canonicalize_manifest(&data_bytes).unwrap();
+
+        // Sign canonical bytes
+        let signature = signing_key.sign(&canonical);
+        let sig_hex = hex::encode(signature.to_bytes());
+
+        // Build full manifest with signature
+        let full_manifest = serde_json::json!({
+            "version": "1.0.0",
+            "plugins": [],
+            "core_tools": [],
+            "signature": sig_hex,
+            "signed_at": "2025-01-01T00:00:00Z"
+        });
+        let full_bytes = serde_json::to_vec(&full_manifest).unwrap();
+
+        // Verify should succeed
+        let result = crypto.verify_manifest_file(&full_bytes);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_envelope_valid() {
+        use ed25519_dalek::Signer;
+
+        let (signing_key, crypto) = test_crypto();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let payload = b"test message".to_vec();
+        let signature = signing_key.sign(&payload);
+
+        let envelope = Envelope {
+            timestamp: now as i64,
+            nonce: 12345,
+            payload: payload.clone(),
+            signature,
+        };
+
+        let result = crypto.verify_envelope(&envelope);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), payload);
+    }
+
+    #[test]
+    fn test_envelope_expired() {
+        use ed25519_dalek::Signer;
+
+        let (signing_key, crypto) = test_crypto();
+
+        let payload = b"test".to_vec();
+        let signature = signing_key.sign(&payload);
+
+        let envelope = Envelope {
+            timestamp: 1000, // way in the past
+            nonce: 1,
+            payload,
+            signature,
+        };
+
+        let result = crypto.verify_envelope(&envelope);
+        assert!(matches!(
+            result,
+            Err(EngineError::EnvelopeExpired)
+        ));
+    }
+
+    #[test]
+    fn test_envelope_nonce_replay() {
+        use ed25519_dalek::Signer;
+
+        let (signing_key, crypto) = test_crypto();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let payload = b"test".to_vec();
+        let signature = signing_key.sign(&payload);
+
+        let envelope = Envelope {
+            timestamp: now as i64,
+            nonce: 999,
+            payload,
+            signature,
+        };
+
+        // First should succeed
+        assert!(crypto.verify_envelope(&envelope).is_ok());
+
+        // Replay should fail
+        let result = crypto.verify_envelope(&envelope);
+        assert!(matches!(
+            result,
+            Err(EngineError::NonceReused)
+        ));
     }
 }

@@ -82,11 +82,12 @@ Thumbs.db
 .assets/
 lab/
 .resolve
-
+.plan
+.discuss
+.system/
 # =========================
 # Legacy
 # =========================
 /old
-manifest/dev_private_key.pem
-manifest/team_public_key.bin
-manifest/team_private_key.pem
+*.pem
+*.bin
