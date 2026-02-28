@@ -160,6 +160,17 @@ impl FileSystemGuard {
         &self.workspace
     }
 
+    /// Check if a path is denied without requiring it to exist on disk.
+    ///
+    /// This is used to validate new file paths before creation, ensuring
+    /// that files like `.env` cannot be created even if they don't exist yet.
+    pub fn check_denied(&self, path: &Path) -> Result<(), EngineError> {
+        if self.is_denied(path) {
+            return Err(EngineError::PathDenied(path.to_path_buf()));
+        }
+        Ok(())
+    }
+
     /// Returns a reference to the deny list.
     pub fn deny_list(&self) -> &[PathBuf] {
         &self.deny_list

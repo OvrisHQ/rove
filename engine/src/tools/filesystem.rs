@@ -40,16 +40,24 @@ impl FilesystemTool {
     pub async fn write_file(&self, path: &str, content: &str) -> Result<String> {
         let target = PathBuf::from(path);
 
-        // For new files that don't exist yet, validate the parent directory
+        // For new files that don't exist yet, validate the full target path
+        // through FileSystemGuard to enforce deny list even for new files
         let validated = if target.exists() {
             self.resolve_path(path)?
         } else {
-            // Ensure parent dir is within workspace
+            // Build absolute path
             let abs = if target.is_absolute() {
                 target.clone()
             } else {
                 self.guard.workspace().join(&target)
             };
+
+            // Check deny list on the target path BEFORE creating directories
+            // This prevents creating files like workspace/.env that bypass the deny list
+            self.guard.check_denied(&abs).map_err(|e| {
+                warn!("Path denied for new file {}: {}", abs.display(), e);
+                anyhow::anyhow!("{}", e)
+            })?;
 
             if let Some(parent) = abs.parent() {
                 if !parent.exists() {

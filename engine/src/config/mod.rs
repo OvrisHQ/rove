@@ -586,8 +586,18 @@ impl Config {
             .map_err(|e| EngineError::Config(format!("Failed to serialize config: {}", e)))?;
 
         // Write to file
-        fs::write(path, toml_string)
+        fs::write(path, &toml_string)
             .map_err(|e| EngineError::Config(format!("Failed to write config file: {}", e)))?;
+
+        // Set restrictive permissions on Unix (config may contain sensitive paths)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(path, perms).map_err(|e| {
+                EngineError::Config(format!("Failed to set config file permissions: {}", e))
+            })?;
+        }
 
         Ok(config)
     }
@@ -701,6 +711,10 @@ impl Config {
 
         // Expand and validate workspace path
         self.core.workspace = expand_path(&self.core.workspace)?;
+
+        // Reject dangerous workspace paths (system roots)
+        reject_dangerous_workspace(&self.core.workspace)?;
+
         self.core.workspace = canonicalize_or_create(&self.core.workspace)?;
 
         // Verify workspace is a directory
@@ -750,6 +764,57 @@ fn expand_path(path: &Path) -> Result<PathBuf, EngineError> {
     } else {
         Ok(path.to_path_buf())
     }
+}
+
+/// Reject workspace paths that are system roots or too broad
+///
+/// Prevents the engine from operating on the entire filesystem by rejecting
+/// paths like `/`, `/etc`, `/home`, `C:\`, etc. Requires at least 2 path
+/// components to ensure the workspace is a specific directory.
+fn reject_dangerous_workspace(path: &Path) -> Result<(), EngineError> {
+    let path_str = path.to_string_lossy();
+
+    // Reject known system roots
+    #[cfg(unix)]
+    {
+        const DANGEROUS_ROOTS: &[&str] = &[
+            "/", "/etc", "/usr", "/var", "/home", "/root",
+            "/bin", "/sbin", "/lib", "/opt", "/sys", "/proc",
+            "/dev", "/tmp",
+        ];
+        for root in DANGEROUS_ROOTS {
+            if path_str == *root || path_str == format!("{}/", root) {
+                return Err(EngineError::Config(format!(
+                    "Workspace path '{}' is a system directory. Choose a more specific path.",
+                    path_str
+                )));
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let lower = path_str.to_lowercase();
+        if lower == "c:\\" || lower == "c:" || lower == "c:\\windows"
+            || lower == "c:\\program files" || lower == "c:\\users"
+        {
+            return Err(EngineError::Config(format!(
+                "Workspace path '{}' is a system directory. Choose a more specific path.",
+                path_str
+            )));
+        }
+    }
+
+    // Require minimum depth of 2 path components
+    let component_count = path.components().count();
+    if component_count < 2 {
+        return Err(EngineError::Config(format!(
+            "Workspace path '{}' is too broad (only {} component). Minimum 2 required.",
+            path_str, component_count
+        )));
+    }
+
+    Ok(())
 }
 
 /// Canonicalize path, creating it if it doesn't exist

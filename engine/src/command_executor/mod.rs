@@ -12,6 +12,7 @@ use thiserror::Error;
 /// - Dangerous pipe pattern detection
 /// - execve-style execution (no shell)
 /// - stdin set to null, stdout/stderr piped
+#[derive(Debug, Clone)]
 pub struct CommandExecutor {
     allowlist: HashSet<String>,
 }
@@ -107,6 +108,37 @@ impl CommandExecutor {
     /// Removes a command from the allowlist.
     pub fn disallow_command(&mut self, command: &str) {
         self.allowlist.remove(command);
+    }
+
+    /// Validates a command through all security gates without executing it.
+    ///
+    /// This is used by `TerminalTool` to validate commands before executing
+    /// them with a custom working directory.
+    pub fn validate(&self, command: &str, args: &[String]) -> Result<(), CommandError> {
+        // Gate 1: Validate command is in allowlist
+        if !self.allowlist.contains(command) {
+            return Err(CommandError::CommandNotAllowed(command.to_string()));
+        }
+
+        // Gate 2: Reject shell invocation patterns
+        if command == "sh" || command == "bash" || command == "zsh" || command == "fish" {
+            return Err(CommandError::ShellInjectionAttempt);
+        }
+
+        // Gate 3: Check for shell metacharacters in arguments
+        for arg in args {
+            if self.has_shell_metacharacters(arg) {
+                return Err(CommandError::ShellMetacharactersDetected(arg.clone()));
+            }
+        }
+
+        // Gate 4: Reject dangerous piping patterns
+        let full_command = format!("{} {}", command, args.join(" "));
+        if self.has_dangerous_pipe(&full_command) {
+            return Err(CommandError::DangerousPipeDetected);
+        }
+
+        Ok(())
     }
 
     /// Executes a command with security validation.

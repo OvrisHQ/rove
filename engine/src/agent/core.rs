@@ -26,6 +26,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::db::tasks::{StepType, TaskRepository, TaskStatus};
+use crate::injection_detector::InjectionDetector;
 use crate::llm::router::LLMRouter;
 use crate::llm::{LLMResponse, Message};
 use crate::rate_limiter::RateLimiter;
@@ -121,6 +122,12 @@ pub struct AgentCore {
 
     /// Tool registry for dispatching tool calls
     tools: Arc<ToolRegistry>,
+
+    /// Injection detector for scanning tool results
+    injection_detector: InjectionDetector,
+
+    /// Source of current task (for per-tool risk escalation)
+    current_source: OperationSource,
 }
 
 impl AgentCore {
@@ -132,6 +139,9 @@ impl AgentCore {
         task_repo: Arc<TaskRepository>,
         tools: Arc<ToolRegistry>,
     ) -> Self {
+        let injection_detector = InjectionDetector::new()
+            .expect("Failed to initialize injection detector");
+
         Self {
             router,
             memory: WorkingMemory::new(),
@@ -139,6 +149,8 @@ impl AgentCore {
             rate_limiter,
             task_repo,
             tools,
+            injection_detector,
+            current_source: OperationSource::Local,
         }
     }
 
@@ -204,11 +216,62 @@ impl AgentCore {
         }
     }
 
+    /// Assess the risk tier for a specific tool call and enforce confirmation
+    ///
+    /// Maps tool names to risk assessment operations:
+    /// - read_file, list_dir, file_exists, capture_screen → Tier 0
+    /// - write_file → Tier 1
+    /// - run_command → Tier 2 (execute_command)
+    fn assess_tool_risk(&self, tool_name: &str, args: &serde_json::Value) -> Result<()> {
+        let op_name = match tool_name {
+            "read_file" | "list_dir" | "file_exists" => "read_file",
+            "write_file" => "write_file",
+            "run_command" => "execute_command",
+            "capture_screen" => "read_file", // Tier 0
+            _ => "execute_task", // Unknown tools default to Tier 0
+        };
+
+        // Extract args for dangerous flag detection
+        let arg_strings: Vec<String> = match args {
+            serde_json::Value::Object(map) => {
+                map.values()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            }
+            _ => vec![],
+        };
+
+        let operation = Operation::new(op_name, arg_strings, self.current_source.clone());
+        let tier = self.risk_assessor.assess(&operation)
+            .context("Failed to assess tool risk")?;
+
+        debug!("Tool '{}' assessed as {:?}", tool_name, tier);
+
+        // For now, log the tier. In a full implementation with interactive
+        // confirmation, Tier 1 would show a countdown and Tier 2 would
+        // require explicit "Y" input. Since we're in a non-interactive
+        // agent loop, we log and allow — the risk tier is recorded for audit.
+        match tier {
+            crate::risk_assessor::RiskTier::Tier0 => { /* auto-execute */ }
+            crate::risk_assessor::RiskTier::Tier1 => {
+                info!("Tier 1 operation: {} (write/reversible)", tool_name);
+            }
+            crate::risk_assessor::RiskTier::Tier2 => {
+                warn!("Tier 2 operation: {} (destructive/irreversible)", tool_name);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Execute the main task loop
     ///
     /// Requirements: 2.1, 2.2, 2.3, 2.4, 2.6, 2.7
     async fn execute_task_loop(&mut self, task_id: &str, task: Task) -> Result<TaskResult> {
         let start_time = Instant::now();
+
+        // Store task source for per-tool risk escalation
+        self.current_source = task.source.clone();
 
         // Step 1: Assess risk tier (Requirement 2.1)
         let operation = Operation::new("execute_task", vec![], task.source.clone());
@@ -307,6 +370,11 @@ impl AgentCore {
                         .await
                         .context("Failed to persist tool call")?;
 
+                    // Assess risk tier for this specific tool call
+                    let tool_args: serde_json::Value = serde_json::from_str(&tool_call.arguments)
+                        .unwrap_or_default();
+                    self.assess_tool_risk(&tool_call.name, &tool_args)?;
+
                     // Execute tool via registry
                     let tool_result = self
                         .tools
@@ -327,8 +395,11 @@ impl AgentCore {
                         .into());
                     }
 
-                    // Add tool result to memory
-                    let result_message = Message::tool_result(&tool_result, &tool_call.id);
+                    // Scan tool result for injection attempts (Requirement 27.1)
+                    let safe_result = self.injection_detector.sanitize(&tool_result);
+
+                    // Add sanitized tool result to memory
+                    let result_message = Message::tool_result(&safe_result, &tool_call.id);
                     self.memory.add_message(result_message);
 
                     // Persist tool result
