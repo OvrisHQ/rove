@@ -90,12 +90,17 @@ impl LLMProvider for GeminiProvider {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
 
-            if status.as_u16() == 400 {
+            if status.as_u16() == 400 || status.as_u16() == 404 {
                 return Err(LLMError::InvalidRequest(text));
             } else if status.as_u16() == 429 {
                 return Err(LLMError::RateLimitExceeded);
-            } else {
+            } else if status.as_u16() == 401 || status.as_u16() == 403 {
                 return Err(LLMError::AuthenticationFailed(text));
+            } else {
+                return Err(LLMError::ProviderUnavailable(format!(
+                    "Gemini API error ({}): {}",
+                    status, text
+                )));
             }
         }
 

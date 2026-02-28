@@ -405,11 +405,11 @@ fn default_openai_model() -> String {
 }
 
 fn default_anthropic_model() -> String {
-    "claude-3-5-sonnet-20241022".to_string()
+    "claude-sonnet-4-5-20250514".to_string()
 }
 
 fn default_gemini_model() -> String {
-    "gemini-1.5-pro".to_string()
+    "gemini-2.0-flash".to_string()
 }
 
 fn default_nvidia_nim_base_url() -> String {

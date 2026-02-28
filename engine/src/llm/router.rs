@@ -169,9 +169,19 @@ impl LLMRouter {
         let mut providers: Vec<&dyn LLMProvider> =
             self.providers.iter().map(|b| b.as_ref()).collect();
 
+        let default_provider = &self.config.default_provider;
+
         providers.sort_by(|a, b| {
             let mut score_a = 0.0_f64;
             let mut score_b = 0.0_f64;
+
+            // Strongly prefer the user's configured default provider
+            if a.name() == default_provider {
+                score_a += 200.0;
+            }
+            if b.name() == default_provider {
+                score_b += 200.0;
+            }
 
             // Prefer local for sensitive tasks
             if profile.sensitivity > self.config.sensitivity_threshold {

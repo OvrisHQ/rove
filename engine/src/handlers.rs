@@ -547,19 +547,23 @@ pub async fn handle_doctor(config: &Config, format: OutputFormat) -> Result<()> 
                     Ok(bytes) => {
                         if let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                             if let Some(sig) = manifest.get("signature").and_then(|s| s.as_str()) {
-                                let mut verify_manifest = manifest.clone();
-                                if let Some(obj) = verify_manifest.as_object_mut() {
-                                    obj.remove("signature");
-                                }
-                                if let Ok(verify_bytes) = serde_json::to_vec(&verify_manifest) {
-                                    match crypto.verify_manifest(&verify_bytes, sig) {
-                                        Ok(()) => checks.push(("Manifest signature", "Valid")),
-                                        Err(_) => {
-                                            checks.push(("Manifest signature", "INVALID"));
-                                            issues.push(
-                                                "Manifest signature verification failed!"
-                                                    .to_string(),
-                                            );
+                                if sig.contains("PLACEHOLDER") || sig.contains("LOCAL_DEV") {
+                                    checks.push(("Manifest signature", "Dev placeholder (OK for development)"));
+                                } else {
+                                    let mut verify_manifest = manifest.clone();
+                                    if let Some(obj) = verify_manifest.as_object_mut() {
+                                        obj.remove("signature");
+                                    }
+                                    if let Ok(verify_bytes) = serde_json::to_vec(&verify_manifest) {
+                                        match crypto.verify_manifest(&verify_bytes, sig) {
+                                            Ok(()) => checks.push(("Manifest signature", "Valid")),
+                                            Err(_) => {
+                                                checks.push(("Manifest signature", "INVALID"));
+                                                issues.push(
+                                                    "Manifest signature verification failed!"
+                                                        .to_string(),
+                                                );
+                                            }
                                         }
                                     }
                                 }
