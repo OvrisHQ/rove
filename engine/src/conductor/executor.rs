@@ -78,7 +78,7 @@ impl Executor {
             let response = self.router.call(&messages).await;
 
             match response {
-                Ok(LLMResponse::ToolCall(tool_call)) => {
+                Ok((LLMResponse::ToolCall(tool_call), _provider)) => {
                     info!("Step {} calling tool: {}", step.id, tool_call.name);
                     tools_used.push(tool_call.name.clone());
 
@@ -113,7 +113,7 @@ impl Executor {
                     )));
                     messages.push(Message::tool_result(&result_text, &tool_call.id));
                 }
-                Ok(LLMResponse::FinalAnswer(answer)) => {
+                Ok((LLMResponse::FinalAnswer(answer), _provider)) => {
                     info!(
                         "Step {} completed in {:.1}s with {} tool calls",
                         step.id,

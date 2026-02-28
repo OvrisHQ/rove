@@ -77,8 +77,9 @@ async fn test_llm_router_failover_with_wiremock() {
 
     let unwrapped = response.unwrap();
     match unwrapped {
-        rove_engine::llm::LLMResponse::FinalAnswer(ans) => {
+        (rove_engine::llm::LLMResponse::FinalAnswer(ans), provider) => {
             assert_eq!(ans.content, "Hello! I am the backup provider.");
+            assert_eq!(provider, "ollama");
         }
         _ => panic!("Expected FinalAnswer"),
     }

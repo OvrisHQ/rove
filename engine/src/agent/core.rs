@@ -34,7 +34,7 @@ use crate::risk_assessor::{Operation, OperationSource, RiskAssessor};
 use crate::tools::ToolRegistry;
 use sdk::errors::EngineError;
 
-use super::WorkingMemory;
+use super::{SteeringEngine, WorkingMemory};
 
 /// Maximum number of iterations per task
 const MAX_ITERATIONS: usize = 20;
@@ -128,6 +128,9 @@ pub struct AgentCore {
 
     /// Source of current task (for per-tool risk escalation)
     current_source: OperationSource,
+
+    /// Steering engine for skill-based behavior shaping
+    steering: Option<SteeringEngine>,
 }
 
 impl AgentCore {
@@ -138,6 +141,7 @@ impl AgentCore {
         rate_limiter: Arc<RateLimiter>,
         task_repo: Arc<TaskRepository>,
         tools: Arc<ToolRegistry>,
+        steering: Option<SteeringEngine>,
     ) -> Self {
         let injection_detector = InjectionDetector::new()
             .expect("Failed to initialize injection detector");
@@ -151,6 +155,7 @@ impl AgentCore {
             tools,
             injection_detector,
             current_source: OperationSource::Local,
+            steering,
         }
     }
 
@@ -296,7 +301,29 @@ impl AgentCore {
 
         // Initialize working memory with system prompt + user message
         self.memory.clear();
-        let system_prompt = self.tools.system_prompt();
+        let mut system_prompt = self.tools.system_prompt();
+
+        // Wire steering directives into system prompt
+        if let Some(ref mut steering) = self.steering {
+            // Auto-activate skills based on task content
+            let risk_tier_u8 = match risk_tier {
+                crate::risk_assessor::RiskTier::Tier0 => 0u8,
+                crate::risk_assessor::RiskTier::Tier1 => 1u8,
+                crate::risk_assessor::RiskTier::Tier2 => 2u8,
+            };
+            steering.auto_activate(&task.input, risk_tier_u8);
+
+            let directives = steering.get_directives();
+            if !directives.system_prefix.is_empty() {
+                system_prompt = format!("{}\n\n{}", directives.system_prefix, system_prompt);
+            }
+            if !directives.system_suffix.is_empty() {
+                system_prompt = format!("{}\n\n{}", system_prompt, directives.system_suffix);
+            }
+
+            debug!("Active skills: {:?}", steering.active_skills());
+        }
+
         self.memory.add_message(Message::system(&system_prompt));
         let user_message = Message::user(&task.input);
         self.memory.add_message(user_message.clone());
@@ -308,7 +335,7 @@ impl AgentCore {
             .context("Failed to persist user message")?;
 
         let mut iteration = 0;
-        let mut _last_provider_used = String::new();
+        let mut last_provider_used = String::from("unknown");
 
         // Step 2: Execute up to MAX_ITERATIONS (Requirement 2.2)
         while iteration < MAX_ITERATIONS {
@@ -318,15 +345,15 @@ impl AgentCore {
                 task_id, iteration, MAX_ITERATIONS
             );
 
-            // Step 3: Call LLM with 30s timeout (Requirement 2.3)
+            // Step 3: Call LLM with timeout (Requirement 2.3)
             let llm_result = timeout(
                 Duration::from_secs(LLM_TIMEOUT_SECS),
                 self.router.call(self.memory.messages()),
             )
             .await;
 
-            let response = match llm_result {
-                Ok(Ok(response)) => response,
+            let (response, provider_name) = match llm_result {
+                Ok(Ok((response, provider))) => (response, provider),
                 Ok(Err(e)) => {
                     error!("LLM call failed: {}", e);
                     return Err(e.into());
@@ -337,10 +364,7 @@ impl AgentCore {
                 }
             };
 
-            // Track which provider was used (from router's last call)
-            // For now, we'll use a placeholder - in a real implementation,
-            // the router would need to expose which provider was used
-            _last_provider_used = "ollama".to_string(); // TODO: Get from router
+            last_provider_used = provider_name;
 
             // Step 4: Handle response (Requirement 2.6, 2.7)
             match response {
@@ -450,7 +474,7 @@ impl AgentCore {
                     return Ok(TaskResult::success(
                         task_id.to_string(),
                         answer.content,
-                        "ollama".to_string(), // TODO: Get actual provider from router
+                        last_provider_used.clone(),
                         duration_ms,
                         iteration,
                     ));
@@ -503,6 +527,7 @@ mod tests {
             rate_limiter,
             task_repo,
             Arc::new(ToolRegistry::empty()),
+            None, // No steering in tests
         );
 
         (temp_dir, agent)

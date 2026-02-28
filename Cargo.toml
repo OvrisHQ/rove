@@ -5,11 +5,8 @@ members = [
     "core-tools/telegram",
     "core-tools/ui-server",
     "core-tools/api-server",
-    "plugins/fs-read",
-    "plugins/fs-editor",
-    "plugins/terminal",
-    "plugins/git",
-    "plugins/screenshot",
+    "rove-plugins",
+    "rove-community-plugins",
 ]
 exclude = []
 resolver = "2"

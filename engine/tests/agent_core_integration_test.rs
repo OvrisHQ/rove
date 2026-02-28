@@ -48,7 +48,7 @@ async fn setup_agent(mock_uri: &str, temp_dir: &TempDir) -> AgentCore {
 
     use rove_engine::tools::ToolRegistry;
     let tools = Arc::new(ToolRegistry::empty());
-    AgentCore::new(router, risk_assessor, rate_limiter, task_repo, tools)
+    AgentCore::new(router, risk_assessor, rate_limiter, task_repo, tools, None)
 }
 
 // Property 1: Agent Loop Iteration Limit

@@ -1,0 +1,16 @@
+[package]
+name = "rove-community-plugins"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+sdk = { path = "../sdk" }
+rove-plugins = { path = "../rove-plugins" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+dirs.workspace = true

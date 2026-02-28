@@ -239,7 +239,7 @@ impl LLMRouter {
     /// 4. Returns AllProvidersExhausted if all fail
     ///
     /// Requirements: 4.4, 4.5
-    pub async fn call(&self, messages: &[Message]) -> super::Result<super::LLMResponse> {
+    pub async fn call(&self, messages: &[Message]) -> super::Result<(super::LLMResponse, String)> {
         use super::LLMError;
 
         // If no providers available, return error immediately
@@ -273,7 +273,7 @@ impl LLMRouter {
             match result {
                 Ok(Ok(response)) => {
                     tracing::info!("Provider {} succeeded", provider.name());
-                    return Ok(response);
+                    return Ok((response, provider.name().to_string()));
                 }
                 Ok(Err(e)) => {
                     tracing::warn!("Provider {} failed: {}", provider.name(), e);

@@ -72,6 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rate_limiter,
         task_repo.clone(),
         tools,
+        None,
     );
 
     println!("🤖 Agent ready!\n");

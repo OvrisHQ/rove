@@ -34,7 +34,7 @@ pub enum OutputFormat {
 ///
 /// Requirements: 15.3
 pub async fn handle_run(task: String, config: &Config, format: OutputFormat) -> Result<()> {
-    use crate::agent::{AgentCore, Task};
+    use crate::agent::{AgentCore, SteeringEngine, Task};
     use crate::db::tasks::TaskRepository;
     use crate::llm::ollama::OllamaProvider;
     use crate::llm::router::LLMRouter;
@@ -138,8 +138,33 @@ pub async fn handle_run(task: String, config: &Config, format: OutputFormat) -> 
         },
     });
 
+    // Load steering engine from config
+    let steering = {
+        let skill_dir = if config.steering.skill_dir.to_string_lossy().starts_with("~/") {
+            let home = dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+            let rest = config.steering.skill_dir.to_string_lossy();
+            let rest = rest.strip_prefix("~/").unwrap_or(&rest);
+            home.join(rest)
+        } else {
+            config.steering.skill_dir.clone()
+        };
+
+        if config.steering.auto_detect {
+            match SteeringEngine::new(&skill_dir).await {
+                Ok(engine) => Some(engine),
+                Err(e) => {
+                    tracing::warn!("Failed to load steering engine: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
     // Create agent
-    let mut agent = AgentCore::new(router, risk_assessor, rate_limiter, task_repo, tools);
+    let mut agent = AgentCore::new(router, risk_assessor, rate_limiter, task_repo, tools, steering);
 
     // Create task
     let agent_task = Task::new(task.clone(), OperationSource::Local);
