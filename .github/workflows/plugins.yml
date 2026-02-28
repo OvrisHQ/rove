@@ -1,0 +1,41 @@
+name: Build Plugins
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "plugins/**"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "plugins/**"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build WASM plugins
+        run: |
+          cargo build -p fs-read --target wasm32-wasip1 --release
+          cargo build -p fs-editor --target wasm32-wasip1 --release
+          cargo build -p terminal --target wasm32-wasip1 --release
+          cargo build -p git --target wasm32-wasip1 --release
+          cargo build -p screenshot --target wasm32-wasip1 --release
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-plugins
+          path: target/wasm32-wasip1/release/*.wasm

@@ -1,0 +1,20 @@
+{
+  "version": "0.1.0",
+  "core_tools": [],
+  "plugins": [
+    {
+      "name": "fs-read",
+      "path": "target/wasm32-wasip1/release/fs_read.wasm",
+      "hash": "blake3:placeholder_for_testing",
+      "permissions": {
+        "allowed_paths": [
+          ".",
+          "/tmp",
+          "/var/log"
+        ],
+        "network": false,
+        "env_vars": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+[core]
+workspace = "."
+log_level = "info"
+auto_sync = false
+data_dir = "~/.rove"
+
+[llm]
+default_provider = "ollama"
+sensitivity_threshold = 0.7
+complexity_threshold = 0.8
+
+[llm.ollama]
+base_url = "http://localhost:11434"
+model = "qwen2.5-coder:7b"
+
+[tools]
+tg-controller = false
+ui-server = false
+api-server = false
+
+[plugins]
+fs-editor = true
+terminal = true
+screenshot = false
+git = false
+
+[security]
+max_risk_tier = 2
+confirm_tier1 = false
+confirm_tier1_delay = 0
+require_explicit_tier2 = true
+
+[brains]
+enabled = false

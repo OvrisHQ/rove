@@ -1,0 +1,63 @@
+{
+  "id": "fs-read",
+  "version": "0.1.0",
+  "description": "Read-only file system access for log files and system diagnostics",
+  "author": "FlowBot Team",
+  "trust": "verified",
+  "permissions": {
+    "filesystem": {
+      "read": [
+        "/var/log/**",
+        "/tmp/**",
+        "$WORKSPACE/**",
+        "$HOME/.FlowBot/**"
+      ],
+      "write": [],
+      "deny": [
+        "**/.env",
+        "**/.env.*",
+        "**/.ssh/**",
+        "**/*.pem",
+        "**/*.key",
+        "**/id_rsa",
+        "**/id_ed25519"
+      ]
+    },
+    "network": false,
+    "terminal": false,
+    "screenshot": false
+  },
+  "tools": [
+    {
+      "name": "read_file",
+      "description": "Read the complete contents of a file. Use when you need to examine an existing file such as log files, configuration files, or text documents. Requires absolute file path. This is a read-only operation.",
+      "parameters": {
+        "path": {
+          "type": "string",
+          "description": "Absolute path to the file to read (e.g., /var/log/system.log)"
+        }
+      }
+    },
+    {
+      "name": "list_directory",
+      "description": "List all files and subdirectories in a directory. Use this to explore directory structure before reading specific files. Returns file names, sizes, and whether each entry is a directory.",
+      "parameters": {
+        "path": {
+          "type": "string",
+          "description": "Absolute path to the directory to list (e.g., /var/log)"
+        }
+      }
+    },
+    {
+      "name": "find_system_logs",
+      "description": "Find common system log files automatically. Use this when you need to locate system logs but don't know exact paths. Optionally filter by log type (e.g., 'error', 'system', 'access'). Returns list of log files with paths and descriptions.",
+      "parameters": {
+        "filter": {
+          "type": "string",
+          "description": "Optional filter to narrow down log files (e.g., 'error' to find error logs)",
+          "required": false
+        }
+      }
+    }
+  ]
+}

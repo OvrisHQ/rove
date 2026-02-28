@@ -1,0 +1,12 @@
+[env]
+TMPDIR = "/tmp"
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-no_compact_unwind"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-no_compact_unwind"]
+
+[alias]
+# Use `cargo lint` to enforce strict unwrap rules
+lint = "clippy --workspace --all-targets -- -D warnings -D clippy::unwrap_used"

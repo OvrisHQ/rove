@@ -1,0 +1,67 @@
+[package]
+name = "engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+name = "rove_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rove"
+path = "src/main.rs"
+
+[dependencies]
+sdk = { path = "../sdk" }
+
+# Workspace dependencies
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+sqlx.workspace = true
+ed25519-dalek.workspace = true
+chacha20poly1305.workspace = true
+blake3.workspace = true
+extism.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+keyring.workspace = true
+toml.workspace = true
+regex.workspace = true
+libloading.workspace = true
+dirs.workspace = true
+
+# Additional dependencies
+async-trait = "0.1"
+futures = "0.3"
+hex = "0.4"
+uuid = { version = "1.10", features = ["v4"] }
+chrono = "0.4"
+self-replace = "1.5"
+semver = "1.0"
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+
+
+# Unix-specific dependencies for daemon management
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal", "process"] }
+
+[dev-dependencies]
+proptest = "1.10.0"
+tempfile = "3.25"
+wiremock = "0.6"
+
+[features]
+default = []
+production = []
+
+[build-dependencies]
+# For embedding team public key at compile time
+hex = "0.4"
+chrono = "0.4"

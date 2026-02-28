@@ -1,0 +1,72 @@
+---
+title: Rove — How It Works
+---
+
+flowchart TD
+    %% ── ENTRY ──
+    USER["User"] -->|"CLI / Telegram / WebSocket"| AGENT
+
+    %% ── AGENT LOOP ──
+    subgraph AGENT["Agent Core (ReAct Loop)"]
+        direction TB
+        RISK["Assess Risk Tier<br/>T0 auto | T1 countdown | T2 confirm"]
+        RATE["Check Rate Limits"]
+        LLM["Call LLM"]
+        PARSE{"Tool call<br/>or answer?"}
+        TOOL["Execute Tool"]
+        ANSWER["Return Final Answer"]
+
+        RISK --> RATE --> LLM --> PARSE
+        PARSE -->|"Tool Call"| TOOL -->|"Result back to LLM"| LLM
+        PARSE -->|"Final Answer"| ANSWER
+    end
+
+    %% ── LLM PROVIDERS ──
+    subgraph PROVIDERS["LLM Router (rank + failover)"]
+        OLLAMA["Ollama<br/>local"]
+        CLOUD["OpenAI | Anthropic<br/>Gemini | NVIDIA NIM"]
+    end
+    LLM --> PROVIDERS
+
+    %% ── TOOLS ──
+    subgraph TOOLS["Tool Registry"]
+        FS["read_file / write_file<br/>list_dir / file_exists"]
+        TERM["run_command"]
+        VIS["capture_screen"]
+    end
+    TOOL --> TOOLS
+
+    %% ── SECURITY ──
+    subgraph SEC["Security Gates"]
+        FSG["FileSystemGuard<br/>deny list + workspace boundary"]
+        CE["CommandExecutor<br/>allowlist, no shell"]
+        INJ["InjectionDetector<br/>block prompt injection"]
+    end
+    FS --> FSG
+    TERM --> CE
+    TOOL -->|"sanitize result"| INJ
+
+    %% ── PERSISTENCE ──
+    DB[("SQLite<br/>tasks, steps, memory")]
+    ANSWER -->|"persist result"| DB
+    TOOL -->|"persist step"| DB
+
+    %% ── SECRETS ──
+    KEYS["OS Keychain<br/>API keys + secrets"]
+    PROVIDERS -.->|"load API keys"| KEYS
+    ANSWER -.->|"scrub secrets"| KEYS
+
+    %% ── STYLING ──
+    classDef user fill:#4A90D9,stroke:#2C5F8A,color:#fff,stroke-width:2px
+    classDef agent fill:#7B68EE,stroke:#483D8B,color:#fff,stroke-width:2px
+    classDef llm fill:#27AE60,stroke:#1E8449,color:#fff,stroke-width:2px
+    classDef tools fill:#F39C12,stroke:#D68910,color:#fff,stroke-width:2px
+    classDef sec fill:#E74C3C,stroke:#C0392B,color:#fff,stroke-width:2px
+    classDef data fill:#2C3E50,stroke:#1A252F,color:#fff,stroke-width:2px
+
+    class USER user
+    class RISK,RATE,LLM,PARSE,TOOL,ANSWER agent
+    class OLLAMA,CLOUD llm
+    class FS,TERM,VIS tools
+    class FSG,CE,INJ sec
+    class DB,KEYS data

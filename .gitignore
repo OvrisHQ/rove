@@ -1,0 +1,92 @@
+# =========================
+# Rust / Cargo (enterprise defaults)
+# =========================
+**/target/
+**/test_target/
+**/*.rs.bk
+**/*.pdb
+**/*.profraw
+**/*.profdata
+**/*.gcda
+**/*.gcno
+**/*.dSYM/
+
+# Cargo local caches and generated lockfiles
+**/.cargo/registry/
+**/.cargo/git/
+
+
+# Rust testing / coverage / benchmarking outputs
+coverage/
+*.lcov
+*.profraw
+*.profdata
+tarpaulin-report.html
+criterion/
+
+# =========================
+# Build artifacts (cross-platform)
+# =========================
+*.so
+*.dylib
+*.dll
+*.wasm
+
+# =========================
+# IDE / editor
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# =========================
+# Environment and secrets
+# =========================
+.env
+.env.local
+manifest/team-keypair.json
+manifest/manifest.json
+~/.rove/
+
+# =========================
+# Logs and local runtime DB files
+# =========================
+*.log
+*.db
+*.db-shm
+*.db-wal
+
+# =========================
+# Web / frontend local artifacts
+# =========================
+lab/node_modules/
+lab/dist/
+lab/.next/
+lab/results/
+
+# =========================
+# OS noise
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Tool / agent directories
+# =========================
+.claude/
+.kiro/
+.review/
+.agent/
+.assets/
+lab/
+.resolve
+
+# =========================
+# Legacy
+# =========================
+/old
+manifest/dev_private_key.pem
+manifest/team_public_key.bin
+manifest/team_private_key.pem

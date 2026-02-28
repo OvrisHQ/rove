@@ -1,0 +1,220 @@
+---
+title: Rove AI Agent System Architecture
+---
+
+graph TB
+    %% ─────────────────────────────────────────────
+    %% ENTRY POINTS
+    %% ─────────────────────────────────────────────
+    subgraph Entry["Entry Points"]
+        CLI["CLI (clap)<br/>rove run/start/stop/status/doctor"]
+        TG["Telegram Bot<br/>Long-polling, /start /status /help"]
+        WS["WebSocket Client<br/>Outbound connection to dashboard"]
+    end
+
+    %% ─────────────────────────────────────────────
+    %% CONFIGURATION & BOOTSTRAP
+    %% ─────────────────────────────────────────────
+    subgraph Config["Configuration & Bootstrap"]
+        CFG["Config (TOML)<br/>~/.rove/config.toml"]
+        SEC["SecretManager<br/>OS Keychain (macOS/Win/Linux)"]
+        TEL["Telemetry<br/>tracing-subscriber"]
+        SETUP["Setup Wizard<br/>Interactive config + DB creation"]
+    end
+
+    %% ─────────────────────────────────────────────
+    %% DAEMON LIFECYCLE
+    %% ─────────────────────────────────────────────
+    subgraph Daemon["Daemon Lifecycle"]
+        DM["DaemonManager<br/>PID file, SIGTERM handler"]
+        MANIFEST["Manifest Verification<br/>Ed25519 sig + BLAKE3 hashes"]
+        SHUTDOWN["Graceful Shutdown<br/>1. Refuse tasks → 2. Wait 30s<br/>3. Stop tools → 4. Close plugins<br/>5. Flush WAL → 6. Remove PID"]
+    end
+
+    %% ─────────────────────────────────────────────
+    %% AGENT CORE
+    %% ─────────────────────────────────────────────
+    subgraph Agent["Agent Core (ReAct Loop)"]
+        AC["AgentCore<br/>process_task()"]
+        WM["WorkingMemory<br/>Context window management"]
+        STEER["SteeringEngine<br/>TOML/MD skills, system prompt<br/>directives, routing prefs"]
+        COND["Conductor<br/>Multi-step planner/executor<br/>evaluator/context assembler"]
+    end
+
+    %% ─────────────────────────────────────────────
+    %% SECURITY GATES
+    %% ─────────────────────────────────────────────
+    subgraph Security["Security Gates"]
+        RA["RiskAssessor<br/>Tier 0: read-only (auto)<br/>Tier 1: write (countdown)<br/>Tier 2: destructive (confirm)"]
+        RL["RateLimiter<br/>60/hr T1, 10/10min T2<br/>DB-backed tracking"]
+        INJ["InjectionDetector<br/>Regex scan tool results<br/>Block prompt injection"]
+        FSG["FileSystemGuard<br/>4-gate path validation<br/>Deny list → Canonicalize<br/>→ Deny list → Workspace check"]
+        CE["CommandExecutor<br/>Allowlist + metachar reject<br/>execve (no shell)"]
+        CRYPTO["CryptoModule<br/>Ed25519 verify + BLAKE3 hash<br/>Nonce replay prevention<br/>Delete compromised files"]
+    end
+
+    %% ─────────────────────────────────────────────
+    %% LLM ROUTING
+    %% ─────────────────────────────────────────────
+    subgraph LLM["LLM Router & Providers"]
+        ROUTER["LLMRouter<br/>Task profiling → rank → failover"]
+        OLLAMA["Ollama Provider<br/>Local, free, 120s timeout"]
+        OPENAI["OpenAI Provider<br/>Cloud, 30s timeout"]
+        ANTHRO["Anthropic Provider<br/>Cloud, 30s timeout"]
+        GEMINI["Gemini Provider<br/>Cloud, 30s timeout"]
+        NVIDIA["NVIDIA NIM Provider<br/>Cloud, 30s timeout"]
+    end
+
+    %% ─────────────────────────────────────────────
+    %% TOOL REGISTRY
+    %% ─────────────────────────────────────────────
+    subgraph Tools["Tool Registry (Native)"]
+        TR["ToolRegistry<br/>dispatch(name, args_json)<br/>system_prompt() generation"]
+        FS["FilesystemTool<br/>read_file, write_file<br/>list_dir, file_exists"]
+        TERM["TerminalTool<br/>run_command<br/>(via CommandExecutor)"]
+        VIS["VisionTool<br/>capture_screen"]
+    end
+
+    %% ─────────────────────────────────────────────
+    %% RUNTIMES
+    %% ─────────────────────────────────────────────
+    subgraph Runtimes["Plugin & Tool Runtimes"]
+        NR["NativeRuntime<br/>dlopen .so/.dylib/.dll<br/>4-gate verification"]
+        WR["WasmRuntime (Extism)<br/>Load .wasm plugins<br/>2-gate verification<br/>Crash restart (3x max)"]
+    end
+
+    %% ─────────────────────────────────────────────
+    %% WASM PLUGINS
+    %% ─────────────────────────────────────────────
+    subgraph Plugins["WASM Plugins"]
+        P_FS["fs-editor.wasm<br/>read/write/list via host fns"]
+        P_TERM["terminal.wasm<br/>command execution stub"]
+        P_GIT["git.wasm<br/>status/log/commit/push"]
+        P_SS["screenshot.wasm<br/>screen capture stub"]
+    end
+
+    %% ─────────────────────────────────────────────
+    %% PERSISTENCE
+    %% ─────────────────────────────────────────────
+    subgraph Persistence["Data Layer"]
+        DB["SQLite (WAL mode)<br/>5-connection pool"]
+        TASKS["TaskRepository<br/>tasks + task_steps"]
+        PLUGDB["PluginRepository<br/>plugin metadata"]
+        MEM["EpisodicMemory<br/>FTS-indexed memory"]
+    end
+
+    %% ─────────────────────────────────────────────
+    %% MESSAGE BUS
+    %% ─────────────────────────────────────────────
+    BUS["MessageBus<br/>Pub/Sub (bounded 100/subscriber)<br/>TaskStarted, TaskCompleted,<br/>PluginCrashed, DaemonStopping"]
+
+    %% ═════════════════════════════════════════════
+    %% CONNECTIONS
+    %% ═════════════════════════════════════════════
+
+    %% Entry → Agent
+    CLI -->|"run 'task'"| AC
+    CLI -->|"start/stop"| DM
+    CLI -->|"setup"| SETUP
+    CLI -->|"doctor"| MANIFEST
+    TG -->|"message → Task(Remote)"| AC
+    WS -->|"SubmitTask"| AC
+
+    %% Config bootstrap
+    CLI -->|"load config"| CFG
+    CFG -->|"API keys"| SEC
+    CFG -->|"log level"| TEL
+    SETUP -->|"write"| CFG
+    SETUP -->|"store keys"| SEC
+    SETUP -->|"create"| DB
+
+    %% Daemon lifecycle
+    DM -->|"on start"| MANIFEST
+    DM -->|"on SIGTERM"| SHUTDOWN
+    DM -->|"manages"| NR
+    DM -->|"manages"| WR
+    DM -->|"owns"| DB
+    MANIFEST -->|"verify"| CRYPTO
+
+    %% Agent core loop
+    AC -->|"1. assess risk"| RA
+    AC -->|"2. check rate"| RL
+    AC -->|"3. inject prompt"| STEER
+    AC -->|"4. call LLM"| ROUTER
+    AC -->|"5. dispatch tool"| TR
+    AC -->|"6. sanitize result"| INJ
+    AC -->|"7. persist"| TASKS
+    AC -->|"memory"| WM
+    COND -->|"orchestrate"| AC
+    COND -->|"plan via"| ROUTER
+
+    %% LLM routing
+    ROUTER -->|"local preferred<br/>for sensitive"| OLLAMA
+    ROUTER -->|"cloud preferred<br/>for complex"| OPENAI
+    ROUTER -->|"failover"| ANTHRO
+    ROUTER -->|"failover"| GEMINI
+    ROUTER -->|"failover"| NVIDIA
+    SEC -->|"API keys"| OPENAI
+    SEC -->|"API keys"| ANTHRO
+    SEC -->|"API keys"| GEMINI
+    SEC -->|"API keys"| NVIDIA
+
+    %% Tool dispatch
+    TR --> FS
+    TR --> TERM
+    TR --> VIS
+    FS -->|"validate path"| FSG
+    TERM -->|"validate cmd"| CE
+
+    %% Runtimes
+    NR -->|"4-gate verify"| CRYPTO
+    WR -->|"2-gate verify"| CRYPTO
+    WR -->|"host functions<br/>guarded by"| FSG
+    WR --> P_FS
+    WR --> P_TERM
+    WR --> P_GIT
+    WR --> P_SS
+    WR -->|"crash events"| BUS
+
+    %% Persistence
+    DB --> TASKS
+    DB --> PLUGDB
+    DB --> MEM
+    RL -->|"track ops"| DB
+
+    %% Telegram specifics
+    TG -->|"scrub secrets"| SEC
+    TG -->|"rate limit"| RL
+    TG -->|"risk escalation<br/>Remote → Tier+1"| RA
+
+    %% WebSocket results
+    AC -->|"TaskCompleted"| WS
+    AC -->|"TaskCompleted"| TG
+
+    %% Message bus connections
+    BUS -.->|"subscribe"| TEL
+
+    %% ─────────────────────────────────────────────
+    %% STYLING
+    %% ─────────────────────────────────────────────
+    classDef entry fill:#4A90D9,stroke:#2C5F8A,color:#fff,stroke-width:2px
+    classDef agent fill:#7B68EE,stroke:#483D8B,color:#fff,stroke-width:2px
+    classDef security fill:#E74C3C,stroke:#C0392B,color:#fff,stroke-width:2px
+    classDef llm fill:#27AE60,stroke:#1E8449,color:#fff,stroke-width:2px
+    classDef tools fill:#F39C12,stroke:#D68910,color:#fff,stroke-width:2px
+    classDef runtime fill:#8E44AD,stroke:#6C3483,color:#fff,stroke-width:2px
+    classDef plugin fill:#D2B4DE,stroke:#8E44AD,color:#333,stroke-width:1px
+    classDef persist fill:#2C3E50,stroke:#1A252F,color:#fff,stroke-width:2px
+    classDef config fill:#5DADE2,stroke:#2E86C1,color:#fff,stroke-width:2px
+    classDef bus fill:#1ABC9C,stroke:#148F77,color:#fff,stroke-width:2px
+
+    class CLI,TG,WS entry
+    class AC,WM,STEER,COND agent
+    class RA,RL,INJ,FSG,CE,CRYPTO security
+    class ROUTER,OLLAMA,OPENAI,ANTHRO,GEMINI,NVIDIA llm
+    class TR,FS,TERM,VIS tools
+    class NR,WR runtime
+    class P_FS,P_TERM,P_GIT,P_SS plugin
+    class DB,TASKS,PLUGDB,MEM persist
+    class CFG,SEC,TEL,SETUP config
+    class BUS,DM,MANIFEST,SHUTDOWN bus
