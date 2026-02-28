@@ -1,0 +1,2 @@
+[build.env]
+passthrough = ["ROVE_TEAM_PUBLIC_KEY"]
