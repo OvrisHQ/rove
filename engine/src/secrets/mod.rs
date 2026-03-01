@@ -7,7 +7,6 @@ pub use string::SecretString;
 use keyring::Entry;
 use regex::Regex;
 use sdk::errors::EngineError;
-use std::io::{self, Write};
 use std::sync::OnceLock;
 
 /// SecretManager handles secure storage and retrieval of secrets using the OS keychain.
@@ -181,20 +180,12 @@ impl SecretManager {
     /// # Errors
     /// Returns `EngineError::KeyringError` if I/O fails
     fn prompt_for_secret(&self, key: &str) -> Result<String, EngineError> {
-        // Write prompt to stderr (not stdout, to avoid interfering with output)
-        eprint!("Enter value for '{}': ", key);
-        io::stderr()
-            .flush()
-            .map_err(|e| EngineError::KeyringError(format!("Failed to flush stderr: {}", e)))?;
-
-        // Read from stdin
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
+        // Use rpassword for echo-free input so secrets aren't visible on screen
+        let prompt = format!("Enter value for '{}': ", key);
+        let secret = rpassword::read_password_from_tty(Some(&prompt))
             .map_err(|e| EngineError::KeyringError(format!("Failed to read input: {}", e)))?;
 
-        // Trim whitespace and newlines
-        let secret = input.trim().to_string();
+        let secret = secret.trim().to_string();
 
         if secret.is_empty() {
             return Err(EngineError::KeyringError(

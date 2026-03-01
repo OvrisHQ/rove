@@ -5,14 +5,14 @@ fn test_safe_command_execution() {
     let executor = CommandExecutor::new();
 
     // Execute a safe command
-    let result = executor.execute("echo", &["Hello, World!".to_string()]);
+    let result = executor.execute("uname", &[]);
     assert!(result.is_ok());
 
     let output = result.unwrap();
     assert!(output.status.success());
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Hello, World!"));
+    assert!(!stdout.is_empty());
 }
 
 #[test]
@@ -47,7 +47,7 @@ fn test_command_injection_prevention() {
     ));
 
     // Attempt command injection via backticks
-    let result = executor.execute("echo", &["`whoami`".to_string()]);
+    let result = executor.execute("ls", &["`whoami`".to_string()]);
     assert!(matches!(
         result,
         Err(CommandError::ShellMetacharactersDetected(_))

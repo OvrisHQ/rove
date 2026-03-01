@@ -54,19 +54,39 @@ impl FileSystemGuard {
             .expect("Failed to canonicalize workspace path");
 
         let deny_list = vec![
+            // SSH keys and config
             PathBuf::from(".ssh"),
-            PathBuf::from(".env"),
-            PathBuf::from(".aws/credentials"),
-            PathBuf::from(".config/gcloud"),
             PathBuf::from("id_rsa"),
             PathBuf::from("id_ed25519"),
             PathBuf::from("id_dsa"),
-            PathBuf::from(".gnupg"),
+            PathBuf::from("id_ecdsa"),
+            PathBuf::from("id_ecdsa_sk"),
+            // Environment and dotfiles
+            PathBuf::from(".env"),
+            PathBuf::from(".env.local"),
+            PathBuf::from(".env.production"),
+            PathBuf::from(".env.staging"),
+            PathBuf::from(".netrc"),
+            PathBuf::from(".git-credentials"),
+            // Cloud provider credentials
+            PathBuf::from(".aws/credentials"),
+            PathBuf::from(".config/gcloud"),
+            PathBuf::from(".azure"),
+            // Container and orchestration
+            PathBuf::from(".docker/config.json"),
             PathBuf::from(".kube/config"),
-            PathBuf::from("credentials"),
-            PathBuf::from("private_key"),
+            // GPG keys
+            PathBuf::from(".gnupg"),
+            // Package manager tokens
             PathBuf::from(".npmrc"),
             PathBuf::from(".pypirc"),
+            PathBuf::from(".yarnrc"),
+            PathBuf::from(".cargo/credentials"),
+            // GitHub CLI
+            PathBuf::from(".config/gh/hosts.yml"),
+            // Generic sensitive names
+            PathBuf::from("credentials"),
+            PathBuf::from("private_key"),
         ];
 
         Self {

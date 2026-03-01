@@ -48,6 +48,7 @@ uuid = { version = "1.10", features = ["v4"] }
 chrono = "0.4"
 self-replace = "1.5"
 zeroize = "1.8"
+rpassword = "5.0"
 semver = "1.0"
 tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
 

